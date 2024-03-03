@@ -1,6 +1,6 @@
 [project]
 name = "curl_cffi"
-version = "0.6.0b9"
+version = "0.6.2"
 authors = [{ name = "Yifei Kong", email = "kong@yifei.me" }]
 description = "libcurl ffi bindings for Python, with impersonation support"
 license = { file = "LICENSE" }
@@ -97,6 +97,7 @@ test-requires = "pytest"
 test-command = "python -bb -m pytest {project}/tests/unittest"
 test-extras = ["test"]
 test-skip = "pp*"
+build-verbosity = 1
 
 
 # configure cibuildwheel to build native archs ('auto'), and some emulated ones
