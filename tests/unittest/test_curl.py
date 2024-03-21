@@ -1,6 +1,7 @@
 import base64
 import json
 from io import BytesIO
+from typing import cast
 
 import pytest
 
@@ -76,6 +77,28 @@ def test_headers(server):
     assert headers["Foo"][0] == "baz"
 
 
+def test_proxy_headers(server):
+    # XXX only tests that proxy header is not present for target server, should add
+    # tests that verifies proxy headers are sent to proxy server.
+    c = Curl()
+    url = str(server.url.copy_with(path="/echo_headers"))
+    c.setopt(CurlOpt.URL, url.encode())
+    c.setopt(CurlOpt.PROXYHEADER, [b"Foo: bar"])
+    buffer = BytesIO()
+    c.setopt(CurlOpt.WRITEDATA, buffer)
+    c.perform()
+    headers = json.loads(buffer.getvalue().decode())
+    assert "Foo" not in headers
+
+    # https://github.com/yifeikong/curl_cffi/issues/16
+    c.setopt(CurlOpt.PROXYHEADER, [b"Foo: baz"])
+    buffer = BytesIO()
+    c.setopt(CurlOpt.WRITEDATA, buffer)
+    c.perform()
+    headers = json.loads(buffer.getvalue().decode())
+    assert "Foo" not in headers
+
+
 def test_write_function_memory_leak(server):
     c = Curl()
     for _ in range(10):
@@ -129,9 +152,7 @@ def test_auth(server):
     c.setopt(CurlOpt.WRITEDATA, buffer)
     c.perform()
     headers = json.loads(buffer.getvalue().decode())
-    assert (
-        headers["Authorization"][0] == f"Basic {base64.b64encode(b'foo:bar').decode()}"
-    )
+    assert headers["Authorization"][0] == f"Basic {base64.b64encode(b'foo:bar').decode()}"
 
 
 def test_timeout(server):
@@ -289,7 +310,7 @@ def test_elapsed(server):
     url = str(server.url)
     c.setopt(CurlOpt.URL, url.encode())
     c.perform()
-    assert c.getinfo(CurlInfo.TOTAL_TIME) > 0
+    assert cast(int, c.getinfo(CurlInfo.TOTAL_TIME)) > 0
 
 
 def test_reason(server):

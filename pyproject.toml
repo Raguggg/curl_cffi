@@ -1,8 +1,8 @@
 [project]
 name = "curl_cffi"
-version = "0.6.2"
+version = "0.6.3b1"
 authors = [{ name = "Yifei Kong", email = "kong@yifei.me" }]
-description = "libcurl ffi bindings for Python, with impersonation support"
+description = "libcurl ffi bindings for Python, with impersonation support."
 license = { file = "LICENSE" }
 dependencies = [
     "cffi>=1.12.0",
@@ -33,7 +33,7 @@ dev = [
     "flake8-bugbear==22.7.1",
     "flake8-pie==0.15.0",
     "httpx==0.23.1",
-    "mypy==0.971",
+    "mypy==1.9.0",
     "types-certifi==2021.10.8.2",
     "pytest==7.1.2",
     "pytest-asyncio==0.19.0",
@@ -43,8 +43,7 @@ dev = [
     "trustme==0.9.0",
     "uvicorn==0.18.3",
     "websockets==11.0.3",
-    "ruff==0.1.14",
-    "nest_asyncio==1.6.0",
+    "ruff==0.3.3",
 ]
 build = [
     "cibuildwheel",
@@ -65,7 +64,6 @@ test = [
     "websockets==11.0.3",
     "python-multipart==0.0.6",
     "fastapi==0.100.0",
-    "nest_asyncio==1.6.0",
 ]
 
 
@@ -91,12 +89,15 @@ build = [
     "cp38-win32",
     "cp38-manylinux_x86_64",
     "cp38-manylinux_aarch64",
+    "cp38-manylinux_i686",
+    "cp38-musllinux_x86_64",
+    "cp38-musllinux_aarch64",
 ]
 before-all = "make preprocess"
 test-requires = "pytest"
 test-command = "python -bb -m pytest {project}/tests/unittest"
 test-extras = ["test"]
-test-skip = "pp*"
+test-skip = "cp38-manylinux_i686"  # trustme not available
 build-verbosity = 1
 
 
@@ -116,6 +117,16 @@ before-all = "gmake preprocess"
 asyncio_mode = "auto"
 
 
+[tool.ruff]
+line-length = 100
+
 [tool.ruff.lint]
 # Enable the isort rules.
 extend-select = ["I"]
+
+[tool.mypy]
+python_version = "3.8"
+ignore_missing_imports = true
+#warn_unused_ignores = true
+#strict = true
+exclude = ["benchmark/", "docs/", "examples/", "scripts/", "tests/", "build/"]
