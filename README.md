@@ -3,8 +3,10 @@
 [![Downloads](https://static.pepy.tech/badge/curl_cffi/week)](https://pepy.tech/project/curl_cffi)
 ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/curl_cffi)
 [![PyPI version](https://badge.fury.io/py/curl-cffi.svg)](https://badge.fury.io/py/curl-cffi)
+[![Generic badge](https://img.shields.io/badge/Telegram%20Group-join-blue?logo=telegram)](https://t.me/+lL9n33eZp480MGM1)
+[![Generic badge](https://img.shields.io/badge/微信交流群-加入-brightgreen?logo=wechat)](./assets/wechat.jpg)
 
-[Documentation](https://curl-cffi.readthedocs.io) | [中文 README](https://github.com/yifeikong/curl_cffi/blob/main/README-zh.md) | [Discuss on Telegram](https://t.me/+lL9n33eZp480MGM1)
+[Documentation](https://curl-cffi.readthedocs.io) | [中文 README](https://github.com/yifeikong/curl_cffi/blob/main/README-zh.md) 
 
 Python binding for [curl-impersonate](https://github.com/lwthiker/curl-impersonate)
 via [cffi](https://cffi.readthedocs.io/en/latest/).
@@ -120,6 +122,9 @@ Supported impersonate versions, as supported by my [fork](https://github.com/yif
 
 However, only Chrome-like browsers are supported. Firefox support is tracked in [#59](https://github.com/yifeikong/curl_cffi/issues/59).
 
+Browser versions will be added **only** when their fingerprints change. If you see a version, e.g.
+chrome122, were skipped, you can simply impersonate it with your own headers and the previous version.
+
 - chrome99
 - chrome100
 - chrome101
@@ -129,6 +134,8 @@ However, only Chrome-like browsers are supported. Firefox support is tracked in 
 - chrome116 <sup>[1]</sup>
 - chrome119 <sup>[1]</sup>
 - chrome120 <sup>[1]</sup>
+- chrome123 <sup>[3]</sup>
+- chrome124 <sup>[3]</sup>
 - chrome99_android
 - edge99
 - edge101
@@ -140,6 +147,7 @@ However, only Chrome-like browsers are supported. Firefox support is tracked in 
 Notes:
 1. Added in version `0.6.0`.
 2. Fixed in version `0.6.0`, previous http2 fingerprints were [not correct](https://github.com/lwthiker/curl-impersonate/issues/215).
+3. Added in version `0.7.0`.
 
 ### asyncio
 

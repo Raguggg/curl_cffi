@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+from contextlib import suppress
 
 import pytest
 
@@ -62,6 +63,35 @@ async def test_options(server):
     async with AsyncSession() as s:
         r = await s.options(str(server.url.copy_with(path="/echo_body")))
         assert r.status_code == 200
+
+
+async def test_base_url(server):
+    async with AsyncSession(
+        base_url=str(server.url.copy_with(path="/a/b", params={"foo": "bar"}))
+    ) as s:
+        # target path is empty
+        r = await s.get("")
+        assert r.url == s.base_url
+
+        # target path only has params
+        r = await s.get("", params={"hello": "world"})
+        assert r.url == str(server.url.copy_with(path="/a/b", params={"hello": "world"}))
+
+        # target path is a relative path without starting /
+        r = await s.get("x")
+        assert r.url == str(server.url.copy_with(path="/a/x"))
+        r = await s.get("x", params={"hello": "world"})
+        assert r.url == str(server.url.copy_with(path="/a/x", params={"hello": "world"}))
+
+        # target path is a relative path with starting /
+        r = await s.get("/x")
+        assert r.url == str(server.url.copy_with(path="/x"))
+        r = await s.get("/x", params={"hello": "world"})
+        assert r.url == str(server.url.copy_with(path="/x", params={"hello": "world"}))
+
+        # target path is an absolute url
+        r = await s.get(str(server.url.copy_with(path="/x/y")))
+        assert r.url == str(server.url.copy_with(path="/x/y"))
 
 
 async def test_params(server):
@@ -281,10 +311,8 @@ async def test_post_body_cleaned(server):
 async def test_timers_leak(server):
     async with AsyncSession() as sess:
         for _ in range(3):
-            try:
+            with suppress(Exception):
                 await sess.get(str(server.url.copy_with(path="/slow_response")), timeout=0.1)
-            except Exception:
-                pass
         await asyncio.sleep(0.2)
         assert len(sess.acurl._timers) == 0
 

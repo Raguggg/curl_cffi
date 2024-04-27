@@ -1,11 +1,11 @@
 import asyncio
 import math
 import queue
-import re
 import threading
 import warnings
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from enum import Enum
 from functools import partialmethod
 from io import BytesIO
@@ -23,7 +23,7 @@ from typing import (
     Union,
     cast,
 )
-from urllib.parse import ParseResult, parse_qsl, unquote, urlencode, urlparse
+from urllib.parse import ParseResult, parse_qsl, unquote, urlencode, urljoin, urlparse
 
 from .. import AsyncCurl, Curl, CurlError, CurlHttpVersion, CurlInfo, CurlOpt
 from ..curl import CURL_WRITEFUNC_ERROR, CurlMime
@@ -33,15 +33,11 @@ from .headers import Headers, HeaderTypes
 from .models import Request, Response
 from .websockets import WebSocket
 
-try:
+with suppress(ImportError):
     import gevent
-except ImportError:
-    pass
 
-try:
+with suppress(ImportError):
     import eventlet.tpool
-except ImportError:
-    pass
 
 if TYPE_CHECKING:
 
@@ -55,7 +51,6 @@ if TYPE_CHECKING:
 else:
     ProxySpec = Dict[str, str]
 
-CHARSET_RE = re.compile(r"charset=([\w-]+)")
 ThreadType = Literal["eventlet", "gevent"]
 
 
@@ -71,13 +66,15 @@ class BrowserType(str, Enum):
     chrome116 = "chrome116"
     chrome119 = "chrome119"
     chrome120 = "chrome120"
+    chrome123 = "chrome123"
+    chrome124 = "chrome124"
     chrome99_android = "chrome99_android"
     safari15_3 = "safari15_3"
     safari15_5 = "safari15_5"
     safari17_0 = "safari17_0"
     safari17_2_ios = "safari17_2_ios"
 
-    chrome = "chrome120"
+    chrome = "chrome123"
     safari = "safari17_0"
     safari_ios = "safari17_2_ios"
 
@@ -87,7 +84,7 @@ class BrowserType(str, Enum):
 
     @classmethod
     def normalize(cls, item):
-        if item == "chrome":
+        if item == "chrome":  # noqa: SIM116
             return cls.chrome
         elif item == "safari":
             return cls.safari
@@ -103,7 +100,13 @@ class BrowserSpec:
     # TODO
 
 
-def _update_url_params(url: str, params: Dict) -> str:
+def _is_absolute_url(url: str) -> bool:
+    """Check if the provided url is an absolute url"""
+    parsed_url = urlparse(url)
+    return bool(parsed_url.scheme and parsed_url.hostname)
+
+
+def _update_url_params(url: str, params: Union[Dict, List, Tuple]) -> str:
     """Add GET params to provided URL being aware of existing.
 
     Parameters:
@@ -120,23 +123,37 @@ def _update_url_params(url: str, params: Dict) -> str:
     """
     # Unquoting URL first so we don't loose existing args
     url = unquote(url)
+
     # Extracting url info
     parsed_url = urlparse(url)
+
     # Extracting URL arguments from parsed URL
     get_args = parsed_url.query
-    # Converting URL arguments to dict
-    parsed_get_args = dict(parse_qsl(get_args))
-    # Merging URL arguments dict with new params
-    parsed_get_args.update(params)
 
-    # Bool and Dict values should be converted to json-friendly values
-    # you may throw this part away if you don't like it :)
-    parsed_get_args.update(
-        {k: dumps(v) for k, v in parsed_get_args.items() if isinstance(v, (bool, dict))}
-    )
+    # Do NOT converting URL arguments to dict
+    parsed_get_args = parse_qsl(get_args)
+
+    # Merging URL arguments dict with new params
+    old_args_counter = Counter(x[0] for x in parsed_get_args)
+    if isinstance(params, dict):
+        params = list(params.items())
+    new_args_counter = Counter(x[0] for x in params)
+
+    for key, value in params:
+        # Bool and Dict values should be converted to json-friendly values
+        # you may throw this part away if you don't like it :)
+        if isinstance(value, (bool, dict)):
+            value = dumps(value)
+
+        # 1 to 1 mapping, we have to search and update it.
+        if old_args_counter.get(key) == 1 and new_args_counter.get(key) == 1:
+            parsed_get_args = [(x if x[0] != key else (key, value)) for x in parsed_get_args]
+        else:
+            parsed_get_args.append((key, value))
 
     # Converting URL argument to proper query string
     encoded_get_args = urlencode(parsed_get_args, doseq=True)
+
     # Creating new parsed result object based on provided with new
     # URL arguments. Same thing happens inside of urlparse.
     new_url = ParseResult(
@@ -190,6 +207,7 @@ class BaseSession:
         proxies: Optional[ProxySpec] = None,
         proxy: Optional[str] = None,
         proxy_auth: Optional[Tuple[str, str]] = None,
+        base_url: Optional[str] = None,
         params: Optional[dict] = None,
         verify: bool = True,
         timeout: Union[float, Tuple[float, float]] = 30,
@@ -198,6 +216,7 @@ class BaseSession:
         max_redirects: int = -1,
         impersonate: Optional[Union[str, BrowserType]] = None,
         default_headers: bool = True,
+        default_encoding: Union[str, Callable[[bytes], str]] = "utf-8",
         curl_options: Optional[dict] = None,
         curl_infos: Optional[list] = None,
         http_version: Optional[CurlHttpVersion] = None,
@@ -208,6 +227,7 @@ class BaseSession:
         self.headers = Headers(headers)
         self.cookies = Cookies(cookies)
         self.auth = auth
+        self.base_url = base_url
         self.params = params
         self.verify = verify
         self.timeout = timeout
@@ -216,6 +236,7 @@ class BaseSession:
         self.max_redirects = max_redirects
         self.impersonate = impersonate
         self.default_headers = default_headers
+        self.default_encoding = default_encoding
         self.curl_options = curl_options or {}
         self.curl_infos = curl_infos or []
         self.http_version = http_version
@@ -230,6 +251,9 @@ class BaseSession:
         self.proxies: ProxySpec = proxies or {}
         self.proxy_auth = proxy_auth
 
+        if self.base_url and not _is_absolute_url(self.base_url):
+            raise ValueError("You need to provide an absolute url for 'base_url'")
+
         self._closed = False
 
     def _set_curl_options(
@@ -237,8 +261,8 @@ class BaseSession:
         curl,
         method: str,
         url: str,
-        params: Optional[dict] = None,
-        data: Optional[Union[Dict[str, str], str, BytesIO, bytes]] = None,
+        params: Optional[Union[Dict, List, Tuple]] = None,
+        data: Optional[Union[Dict[str, str], List[Tuple], str, BytesIO, bytes]] = None,
         json: Optional[dict] = None,
         headers: Optional[HeaderTypes] = None,
         cookies: Optional[CookieTypes] = None,
@@ -272,16 +296,20 @@ class BaseSession:
             c.setopt(CurlOpt.POST, 1)
         elif method != "GET":
             c.setopt(CurlOpt.CUSTOMREQUEST, method.encode())
+        if method == "HEAD":
+            c.setopt(CurlOpt.NOBODY, 1)
 
         # url
         if self.params:
             url = _update_url_params(url, self.params)
         if params:
             url = _update_url_params(url, params)
+        if self.base_url:
+            url = urljoin(self.base_url, url)
         c.setopt(CurlOpt.URL, url.encode())
 
         # data/body/json
-        if isinstance(data, dict):
+        if isinstance(data, (dict, list, tuple)):
             body = urlencode(data).encode()
         elif isinstance(data, str):
             body = data.encode()
@@ -298,7 +326,8 @@ class BaseSession:
 
         # Tell libcurl to be aware of bodies and related headers when,
         # 1. POST/PUT/PATCH, even if the body is empty, it's up to curl to decide what to do;
-        # 2. GET/DELETE with body, although it's against the RFC, some applications. e.g. Elasticsearch, use this.
+        # 2. GET/DELETE with body, although it's against the RFC, some applications.
+        #   e.g. Elasticsearch, use this.
         if body or method in ("POST", "PUT", "PATCH"):
             c.setopt(CurlOpt.POSTFIELDS, body)
             # necessary if body contains '\0'
@@ -307,7 +336,6 @@ class BaseSession:
         # headers
         h = Headers(self.headers)
         h.update(headers)
-
         # remove Host header if it's unnecessary, otherwise curl maybe confused.
         # Host header will be automatically added by curl if it's not present.
         # https://github.com/yifeikong/curl_cffi/issues/119
@@ -315,19 +343,12 @@ class BaseSession:
         if host_header is not None:
             u = urlparse(url)
             if host_header == u.netloc or host_header == u.hostname:
-                try:
-                    del h["Host"]
-                except KeyError:
-                    pass
-
-        header_lines = []
-        for k, v in h.multi_items():
-            header_lines.append(f"{k}: {v}")
+                h.pop("Host", None)
+        header_lines = [f"{k}: {v}" for k, v in h.multi_items()]
         if json is not None:
             _update_header_line(header_lines, "Content-Type", "application/json")
         if isinstance(data, dict) and method != "POST":
             _update_header_line(header_lines, "Content-Type", "application/x-www-form-urlencoded")
-        # print("header lines", header_lines)
         c.setopt(CurlOpt.HTTPHEADER, [h.encode() for h in header_lines])
 
         req = Request(url, h, method)
@@ -520,9 +541,6 @@ class BaseSession:
         header_buffer = BytesIO()
         c.setopt(CurlOpt.HEADERDATA, header_buffer)
 
-        if method == "HEAD":
-            c.setopt(CurlOpt.NOBODY, 1)
-
         # interface
         interface = interface or self.interface
         if interface:
@@ -534,7 +552,7 @@ class BaseSession:
 
         return req, buffer, header_buffer, q, header_recved, quit_now
 
-    def _parse_response(self, curl, buffer, header_buffer):
+    def _parse_response(self, curl, buffer, header_buffer, default_encoding):
         c = curl
         rsp = Response(c)
         rsp.url = cast(bytes, c.getinfo(CurlInfo.EFFECTIVE_URL)).decode()
@@ -570,13 +588,7 @@ class BaseSession:
         rsp.cookies = self.cookies
         # print("Cookies after extraction", self.cookies)
 
-        content_type = rsp.headers.get("Content-Type", default="")
-        charset_match = CHARSET_RE.search(content_type)
-        charset = charset_match.group(1) if charset_match else "utf-8"
-
-        rsp.charset = charset
-        rsp.encoding = charset  # TODO use chardet
-
+        rsp.default_encoding = default_encoding
         rsp.elapsed = cast(float, c.getinfo(CurlInfo.TOTAL_TIME))
         rsp.redirect_count = cast(int, c.getinfo(CurlInfo.REDIRECT_COUNT))
         rsp.redirect_url = cast(bytes, c.getinfo(CurlInfo.REDIRECT_URL)).decode()
@@ -615,8 +627,10 @@ class Session(BaseSession):
             cookies: cookies to add in the session.
             auth: HTTP basic auth, a tuple of (username, password), only basic auth is supported.
             proxies: dict of proxies to use, format: {"http": proxy_url, "https": proxy_url}.
-            proxy: proxy to use, format: "http://proxy_url". Cannot be used with the above parameter.
+            proxy: proxy to use, format: "http://proxy_url".
+                Cannot be used with the above parameter.
             proxy_auth: HTTP basic auth for proxy, a tuple of (username, password).
+            base_url: absolute url to use for relative urls.
             params: query string for the session.
             verify: whether to verify https certs.
             timeout: how many seconds to wait before giving up.
@@ -625,6 +639,8 @@ class Session(BaseSession):
             max_redirects: max redirect counts, default unlimited(-1).
             impersonate: which browser version to impersonate in the session.
             interface: which interface use in request to server.
+            default_encoding: encoding for decoding response content if charset is not found in
+                headers. Defaults to "utf-8". Can be set to a callable for automatic detection.
 
         Notes:
             This class can be used as a context manager.
@@ -656,7 +672,7 @@ class Session(BaseSession):
     def curl(self):
         if self._use_thread_local_curl:
             if self._is_customized_curl:
-                warnings.warn("Creating fresh curl handle in different thread.")
+                warnings.warn("Creating fresh curl handle in different thread.", stacklevel=2)
             if not getattr(self._local, "curl", None):
                 self._local.curl = Curl(debug=self.debug)
             return self._local.curl
@@ -675,7 +691,7 @@ class Session(BaseSession):
     def __exit__(self, *args):
         self.close()
 
-    def close(self):
+    def close(self) -> None:
         """Close the session."""
         self._closed = True
         self.curl.close()
@@ -734,8 +750,8 @@ class Session(BaseSession):
         self,
         method: str,
         url: str,
-        params: Optional[dict] = None,
-        data: Optional[Union[Dict[str, str], str, BytesIO, bytes]] = None,
+        params: Optional[Union[Dict, List, Tuple]] = None,
+        data: Optional[Union[Dict[str, str], List[Tuple], str, BytesIO, bytes]] = None,
         json: Optional[dict] = None,
         headers: Optional[HeaderTypes] = None,
         cookies: Optional[CookieTypes] = None,
@@ -753,6 +769,7 @@ class Session(BaseSession):
         content_callback: Optional[Callable] = None,
         impersonate: Optional[Union[str, BrowserType]] = None,
         default_headers: Optional[bool] = None,
+        default_encoding: Union[str, Callable[[bytes], str]] = "utf-8",
         http_version: Optional[CurlHttpVersion] = None,
         interface: Optional[str] = None,
         cert: Optional[Union[str, Tuple[str, str]]] = None,
@@ -811,7 +828,7 @@ class Session(BaseSession):
                 try:
                     c.perform()
                 except CurlError as e:
-                    rsp = self._parse_response(c, buffer, header_buffer)
+                    rsp = self._parse_response(c, buffer, header_buffer, default_encoding)
                     rsp.request = req
                     cast(queue.Queue, q).put_nowait(RequestsError(str(e), e.code, rsp))
                 finally:
@@ -829,7 +846,7 @@ class Session(BaseSession):
 
             # Wait for the first chunk
             cast(threading.Event, header_recved).wait()
-            rsp = self._parse_response(c, buffer, header_buffer)
+            rsp = self._parse_response(c, buffer, header_buffer, default_encoding)
             header_parsed.set()
 
             # Raise the exception if something wrong happens when receiving the header.
@@ -854,11 +871,11 @@ class Session(BaseSession):
                 else:
                     c.perform()
             except CurlError as e:
-                rsp = self._parse_response(c, buffer, header_buffer)
+                rsp = self._parse_response(c, buffer, header_buffer, default_encoding)
                 rsp.request = req
                 raise RequestsError(str(e), e.code, rsp) from e
             else:
-                rsp = self._parse_response(c, buffer, header_buffer)
+                rsp = self._parse_response(c, buffer, header_buffer, default_encoding)
                 rsp.request = req
                 return rsp
             finally:
@@ -890,13 +907,16 @@ class AsyncSession(BaseSession):
         Parameters:
             loop: loop to use, if not provided, the running loop will be used.
             async_curl: [AsyncCurl](/api/curl_cffi#curl_cffi.AsyncCurl) object to use.
-            max_clients: maxmium curl handle to use in the session, this will affect the concurrency ratio.
+            max_clients: maxmium curl handle to use in the session,
+                this will affect the concurrency ratio.
             headers: headers to use in the session.
             cookies: cookies to add in the session.
             auth: HTTP basic auth, a tuple of (username, password), only basic auth is supported.
             proxies: dict of proxies to use, format: {"http": proxy_url, "https": proxy_url}.
-            proxy: proxy to use, format: "http://proxy_url". Cannot be used with the above parameter.
+            proxy: proxy to use, format: "http://proxy_url".
+                Cannot be used with the above parameter.
             proxy_auth: HTTP basic auth for proxy, a tuple of (username, password).
+            base_url: absolute url to use for relative urls.
             params: query string for the session.
             verify: whether to verify https certs.
             timeout: how many seconds to wait before giving up.
@@ -904,6 +924,8 @@ class AsyncSession(BaseSession):
             allow_redirects: whether to allow redirection.
             max_redirects: max redirect counts, default unlimited(-1).
             impersonate: which browser version to impersonate in the session.
+            default_encoding: encoding for decoding response content if charset is not found
+                in headers. Defaults to "utf-8". Can be set to a callable for automatic detection.
 
         Notes:
             This class can be used as a context manager, and it's recommended to use via
@@ -953,10 +975,8 @@ class AsyncSession(BaseSession):
         return curl
 
     def push_curl(self, curl):
-        try:
+        with suppress(asyncio.QueueFull):
             self.pool.put_nowait(curl)
-        except asyncio.QueueFull:
-            pass
 
     async def __aenter__(self):
         return self
@@ -965,7 +985,7 @@ class AsyncSession(BaseSession):
         await self.close()
         return None
 
-    async def close(self):
+    async def close(self) -> None:
         """Close the session."""
         await self.acurl.close()
         self._closed = True
@@ -1009,8 +1029,8 @@ class AsyncSession(BaseSession):
         self,
         method: str,
         url: str,
-        params: Optional[dict] = None,
-        data: Optional[Union[Dict[str, str], str, BytesIO, bytes]] = None,
+        params: Optional[Union[Dict, List, Tuple]] = None,
+        data: Optional[Union[Dict[str, str], List[Tuple], str, BytesIO, bytes]] = None,
         json: Optional[dict] = None,
         headers: Optional[HeaderTypes] = None,
         cookies: Optional[CookieTypes] = None,
@@ -1028,6 +1048,7 @@ class AsyncSession(BaseSession):
         content_callback: Optional[Callable] = None,
         impersonate: Optional[Union[str, BrowserType]] = None,
         default_headers: Optional[bool] = None,
+        default_encoding: Union[str, Callable[[bytes], str]] = "utf-8",
         http_version: Optional[CurlHttpVersion] = None,
         interface: Optional[str] = None,
         cert: Optional[Union[str, Tuple[str, str]]] = None,
@@ -1078,7 +1099,7 @@ class AsyncSession(BaseSession):
                 try:
                     await task
                 except CurlError as e:
-                    rsp = self._parse_response(curl, buffer, header_buffer)
+                    rsp = self._parse_response(curl, buffer, header_buffer, default_encoding)
                     rsp.request = req
                     cast(asyncio.Queue, q).put_nowait(RequestsError(str(e), e.code, rsp))
                 finally:
@@ -1098,7 +1119,7 @@ class AsyncSession(BaseSession):
             # Unlike threads, coroutines does not use preemptive scheduling.
             # For asyncio, there is no need for a header_parsed event, the
             # _parse_response will execute in the foreground, no background tasks running.
-            rsp = self._parse_response(curl, buffer, header_buffer)
+            rsp = self._parse_response(curl, buffer, header_buffer, default_encoding)
 
             first_element = _peek_aio_queue(cast(asyncio.Queue, q))
             if isinstance(first_element, RequestsError):
@@ -1117,11 +1138,11 @@ class AsyncSession(BaseSession):
                 await task
                 # print(curl.getinfo(CurlInfo.CAINFO))
             except CurlError as e:
-                rsp = self._parse_response(curl, buffer, header_buffer)
+                rsp = self._parse_response(curl, buffer, header_buffer, default_encoding)
                 rsp.request = req
                 raise RequestsError(str(e), e.code, rsp) from e
             else:
-                rsp = self._parse_response(curl, buffer, header_buffer)
+                rsp = self._parse_response(curl, buffer, header_buffer, default_encoding)
                 rsp.request = req
                 return rsp
             finally:
