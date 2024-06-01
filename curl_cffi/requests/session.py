@@ -213,7 +213,7 @@ class BaseSession:
         timeout: Union[float, Tuple[float, float]] = 30,
         trust_env: bool = True,
         allow_redirects: bool = True,
-        max_redirects: int = -1,
+        max_redirects: int = 30,
         impersonate: Optional[Union[str, BrowserType]] = None,
         default_headers: bool = True,
         default_encoding: Union[str, Callable[[bytes], str]] = "utf-8",
@@ -336,7 +336,8 @@ class BaseSession:
         # headers
         h = Headers(self.headers)
         h.update(headers)
-        # remove Host header if it's unnecessary, otherwise curl maybe confused.
+
+        # remove Host header if it's unnecessary, otherwise curl may get confused.
         # Host header will be automatically added by curl if it's not present.
         # https://github.com/yifeikong/curl_cffi/issues/119
         host_header = h.get("Host")
@@ -344,11 +345,22 @@ class BaseSession:
             u = urlparse(url)
             if host_header == u.netloc or host_header == u.hostname:
                 h.pop("Host", None)
-        header_lines = [f"{k}: {v}" for k, v in h.multi_items()]
+
+        # Make curl always include empty headers.
+        # See: https://stackoverflow.com/a/32911474/1061155
+        header_lines = []
+        for k, v in h.multi_items():
+            header_lines.append(f"{k}: {v}" if v else f"{k};")
+
+        # Add content-type if missing
         if json is not None:
             _update_header_line(header_lines, "Content-Type", "application/json")
         if isinstance(data, dict) and method != "POST":
             _update_header_line(header_lines, "Content-Type", "application/x-www-form-urlencoded")
+
+        # Never send `Expect` header.
+        _update_header_line(header_lines, "Expect", "")
+
         c.setopt(CurlOpt.HTTPHEADER, [h.encode() for h in header_lines])
 
         req = Request(url, h, method)
@@ -636,7 +648,7 @@ class Session(BaseSession):
             timeout: how many seconds to wait before giving up.
             trust_env: use http_proxy/https_proxy and other environments, default True.
             allow_redirects: whether to allow redirection.
-            max_redirects: max redirect counts, default unlimited(-1).
+            max_redirects: max redirect counts, default 30, use -1 for unlimited.
             impersonate: which browser version to impersonate in the session.
             interface: which interface use in request to server.
             default_encoding: encoding for decoding response content if charset is not found in
@@ -922,7 +934,7 @@ class AsyncSession(BaseSession):
             timeout: how many seconds to wait before giving up.
             trust_env: use http_proxy/https_proxy and other environments, default True.
             allow_redirects: whether to allow redirection.
-            max_redirects: max redirect counts, default unlimited(-1).
+            max_redirects: max redirect counts, default 30, use -1 for unlimited.
             impersonate: which browser version to impersonate in the session.
             default_encoding: encoding for decoding response content if charset is not found
                 in headers. Defaults to "utf-8". Can be set to a callable for automatic detection.
